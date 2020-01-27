@@ -143,10 +143,10 @@ In general, radix trees have two types of nodes. The first are inner nodes, whic
 
 The second type of node is leaf nodes, which store the values of each entry. In contrast to binary search trees, radix trees have several interesting properties (1) Nodes in radix trees do not contain complete keys; instead, they represent partial keys, and only the full path from the root to a leaf node describes the complete key corresponding to a value. (2) No rebalancing operations are ever needed. 
 
-In our radix tree index structure design, there are three nodes structures:  common nodes, inner nodes and leaf nodes. Common nodes store data shared by inner and leaf nodes. In order to maintain a clean and well-structured code base, \textbf{both} inner and leaf nodes inherit from common nodes. 
+In Wavefront radix tree index structure design, there are three nodes structures:  base nodes, inner nodes and leaf nodes. Base nodes store data shared by inner and leaf nodes. In order to maintain a clean and well-structured code base, \textbf{both} inner and leaf nodes inherit from base nodes. 
 
-\subsubsection{Common Nodes}
-Common nodes have {\itshape variable length partial keys} used for vertical compression. As mentioned in section \ref{sec:intro}, vertical compression is mainly realized by collapsing levels in the tree when an inner node has only one child. For example, in Figure \ref{fig:vertical-compression}, the inner node representing the partial key “C” is merged down. In such cases, the partial keys corresponding to the missing nodes are stored as our variable length keys inside common nodes. Other than partial keys, common nodes also keep some metadata, including a boolean that indicates whether this node is a leaf or not, an integer to keep track of the common prefix length with its ancestors and a parent pointer. The latter two are not mandatory but will help simplify and expedite the process of key reconstruction. 
+\subsubsection{Base Nodes}
+Base nodes have {\itshape variable length partial keys} used for vertical compression. As mentioned in section \ref{sec:intro}, vertical compression is mainly realized by collapsing levels in the tree when an inner node has only one child. For example, in Figure \ref{fig:vertical-compression}, the inner node representing the partial key “C” is merged down. In such cases, the partial keys corresponding to the missing nodes are stored as our variable length keys inside base nodes. Other than partial keys, base nodes also keep some metadata, including a boolean that indicates whether this node is a leaf or not, an integer to keep track of the common prefix length with its ancestors and a parent pointer. The latter two are not mandatory but will help simplify and expedite the process of key reconstruction. 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth, height=6.5cm]{pic/vertical compression.png}
@@ -168,7 +168,7 @@ Additionally, when it comes to space overhead, Node3 can have 1 to 3 children wi
   \centering
   \includegraphics[width=\linewidth, height=6.5cm]{pic/inner nodes.png}
   \setlength{\belowcaptionskip}{-7pt} 
-  \caption{Data representations for inner nodes. In both cases, partial keys 4, 128 are mapped to the next-level node A, B. But for Inner Node(Dynamic) type, it contains more entries.}
+  \caption{Data representations for inner nodes. In both cases, partial keys 4, 128 are mapped to the next-level node A, B. But for Inner Node(Dynamic) , it contains more entries.}
   \label{fig:inner-nodes}
 \end{figure}
 
@@ -188,7 +188,7 @@ Figure \ref{fig:leaf-nodes} shows an example of the two options. The second one 
 \end{figure}
 
 \subsection{Other Optimizations}
-\textbf {Bit Fields} : Different data types in C/C++ usually have different alignment requirements determined by the processor architecture. To maintain proper alignment in data structures, the complier normally inserts additional unnamed data members so that each member is properly aligned. For example, if we construct a data structure with one boolean and one double, the system may end up allocating 16 bytes of memory on a 64-bit platform instead of 9 due to padding. Structure padding thus causes unnecessary overhead.  We solve this problem by using bit fields to pack multiple values into a single declared variable. By specifying the width of variable in bits when we know the value will never exceed a limit, we were able to use bit fields to better represent the meta information in common nodes and reduce the per-node overhead from 24 bytes to 8 bytes.
+\textbf {Bit Fields} : Different data types in C/C++ usually have different alignment requirements determined by the processor architecture. To maintain proper alignment in data structures, the complier normally inserts additional unnamed data members so that each member is properly aligned. For example, if we construct a data structure with one boolean and one double, the system may end up allocating 16 bytes of memory on a 64-bit platform instead of 9 due to padding. Structure padding thus causes unnecessary overhead.  We solve this problem by using bit fields to pack multiple values into a single declared variable. By specifying the width of variable in bits when we know the value will never exceed a limit, we were able to use bit fields to better represent the meta information in base nodes and reduce the per-node overhead from 24 bytes to 8 bytes.
 
 \textbf {std::map VS. std::vector} : For the inner Node (dynamic) type, we have two options for storing partial keys and child pointers:  std::map and std::vector are both dynamic data structures defined in STL C++.  The former is a sorted key-value container, usually implemented as a red-black tree, that requires additional memory usage for maintaining the structure, while the latter is a sequence array whose order we need to maintain in order to keep the entries in order. We pick std::vector to save memory usage, and take advantage of binary search algorithm or SIMD instructions to speedup searching in the linearly-organized vector. 
 
@@ -217,7 +217,7 @@ For our workloads,
 \end{itemize}
 
 \subsection{Space Consumption}
-Table \ref{tab:memory-usage} reports the memory consumption in MiB for two different storage engines. Memory consumption here is a metric gathered by the operating system.  Other than raw key-value size, it also includes node overhead, memory pool padding, data replication, etc. The table shows that for all datasets, radix tree outperforms the default implementation in terms of space efficiency. For Wavefront workloads, when the system stabilized, our radix tree store consumes 25\% less memory for each storage server process; for textual datasets, like the Wikipedia archive, our radix tree store still requires 20\% less space. 
+Table \ref{tab:memory-usage} reports the memory consumption in MiB for two different storage engines. Memory consumption here is a metric gathered by the operating system.  Other than raw key-value size, it also includes node overhead, memory pool padding, data replication, etc. The table shows that for all datasets, radix tree outperforms the default implementation in terms of space efficiency. For Wavefront workloads, when the system stabilized, our radix tree store consumes 25\% less memory for each storage server process; for textual datasets, like the Wikipedia archive, our radix tree store requires 20\% less space. 
 
 \begin{table}[h]
   \caption{Memory consumption for storage engine types (in MiB)}
