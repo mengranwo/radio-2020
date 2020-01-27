@@ -95,7 +95,7 @@ After decades of development in modern hardware, commodity servers with terabyte
 
 The goal of this paper is to describe the design and implementation of a new FoundationDB main-memory storage engine based on the radix tree index structure. 
 
-A radix tree \cite{addme} is a space-optimized trie that achieves its low memory consumption via {\itshape vertical compression}. By vertical compression, each node in radix tree that is an only child is merged with its parent to help reduce the tree height. However, this requires a trade-off between tree height and nodal space efficiency, controlled by a globally valid span parameter. For a given span {\itshape s}, keys are split into partial keys of {\itshape s} bits each and inner nodes usually use an array of $2^{s}$ to store child pointers. The problem of a larger span value is wasted space consumption as most of the pointers in the nodes will be empty and the actual fanout is typically much smaller than the optimal number (i.e., $2^{s}$). ART \cite{leis2013adaptive} overcome this shortcoming using adaptive inner nodes (also known as {\itshape horizontal compression}) where the inner node type is dynamically decided by the number of children. 
+A radix tree \cite{morrison1968patricia} is a space-optimized trie that achieves its low memory consumption via {\itshape vertical compression}. By vertical compression, each node in radix tree that is an only child is merged with its parent to help reduce the tree height. However, this requires a trade-off between tree height and nodal space efficiency, controlled by a globally valid span parameter. For a given span {\itshape s}, keys are split into partial keys of {\itshape s} bits each and inner nodes usually use an array of $2^{s}$ to store child pointers. The problem of a larger span value is wasted space consumption as most of the pointers in the nodes will be empty and the actual fanout is typically much smaller than the optimal number (i.e., $2^{s}$). ART \cite{leis2013adaptive} overcome this shortcoming using adaptive inner nodes (also known as {\itshape horizontal compression}) where the inner node type is dynamically decided by the number of children. 
 
 We show in this paper how to implement a variant of adaptive inner nodes specifically tuned for the Wavefront workloads. We follow the high-level strategy of creating different inner node types but simplify the conversion logic and merge some node types into one using a more compact representation. Furthermore, other additional optimizations, including in-line data that leverages the {\itshape union} type, bit fields  \cite{oualline1997practical} and replacing std::map with std::vector, allow the Wavefront radix tree to further decrease space usage by avoiding unnecessary memory heap allocation. 
 
@@ -118,7 +118,7 @@ For the memory storage engine specifically, data goes directly into {\itshape ke
   \includegraphics[width=\linewidth, height=6cm]{pic/FDB-storage-architecture.png}
   \setlength{\abovecaptionskip}{-10pt} 
   \setlength{\belowcaptionskip}{-7pt} 
-  \caption{FDB storage server key components, where the key-value container is essentially the index structure.}
+  \caption{FDB storage server key components, where the key-value container is essentially an index structure.}
   \label{fig:FDB-storage-architecture}
 \end{figure}
 
@@ -139,12 +139,14 @@ With this structure, the higher order parts of the key such as customer, metric,
 This section presents implementation details of our radix tree key-value container. We start with a deep dive into node structures, focusing on their functionalities and space consumption. Next, we list key data structure enhancements we made in order to improve space efficiency.
 
 \subsection{Node Structures}
-In general, radix trees have two types of nodes. The first are inner nodes, which map partial keys to the next-level child. In a traditional implementation, inner nodes usually keep a fixed array of child pointers where the array size is controlled by the global span parameter s. This parameter is crucial for the performance of radix trees because it determines the tree height as well as the memory overhead for inner nodes. In our design, we choose s = 8, corresponding to partial keys of 1 byte to avoid unnecessary bit shifting and masking operations. However, this choice could lead to the need to allocate 256 child pointers and thus excessive memory usage \cite{boehm2011efficient}.  We tackle this problem by using adaptive inner nodes (details in section \ref{sec:inner-nodes}). The second type of nodes are leaf nodes, which store the values of each entry. In contrast to binary search trees, radix trees have several interesting properties (1) Nodes in radix trees do not contain complete keys; instead, they represent partial keys, and only the full path from the root to a leaf node describes the complete key corresponding to a value. (2) No rebalancing operations are ever needed. 
+In general, radix trees have two types of nodes. The first are inner nodes, which map partial keys to the next-level child. In a traditional implementation, inner nodes usually keep a fixed array of child pointers where the array size is controlled by the global span parameter s. This parameter is crucial for the performance of radix trees because it determines the tree height as well as the memory overhead for inner nodes. 
 
-In our radix tree index structure design, there are three types of nodes:  common nodes, inner nodes and leaf nodes. 
+The second type of node is leaf nodes, which store the values of each entry. In contrast to binary search trees, radix trees have several interesting properties (1) Nodes in radix trees do not contain complete keys; instead, they represent partial keys, and only the full path from the root to a leaf node describes the complete key corresponding to a value. (2) No rebalancing operations are ever needed. 
+
+In our radix tree index structure design, there are three nodes structures:  common nodes, inner nodes and leaf nodes. Common nodes store data shared by inner and leaf nodes. In order to maintain a clean and well-structured code base, \textbf{both} inner and leaf nodes inherit from common nodes. 
 
 \subsubsection{Common Nodes}
-In order to maintain a clean and well-structured code base, we create an extra node type that stores data shared by \textbf{both} inner and leaf nodes. Common nodes have {\itshape variable length partial keys} used for vertical compression. As mentioned in section \ref{sec:intro}, vertical compression is mainly realized by collapsing levels in the tree when an inner node has only one child. For example, in Figure \ref{fig:vertical-compression}, the inner node representing the partial key “C” is merged down. In such cases, the partial keys corresponding to the missing nodes are stored as our variable length keys inside common nodes. Other than partial keys, common nodes also keep some metadata, including a boolean that indicates whether this node is a leaf or not, an integer to keep track of the common prefix length with its ancestors and a parent pointer. The latter two are not mandatory but will help simplify and expedite the process of key reconstruction. 
+Common nodes have {\itshape variable length partial keys} used for vertical compression. As mentioned in section \ref{sec:intro}, vertical compression is mainly realized by collapsing levels in the tree when an inner node has only one child. For example, in Figure \ref{fig:vertical-compression}, the inner node representing the partial key “C” is merged down. In such cases, the partial keys corresponding to the missing nodes are stored as our variable length keys inside common nodes. Other than partial keys, common nodes also keep some metadata, including a boolean that indicates whether this node is a leaf or not, an integer to keep track of the common prefix length with its ancestors and a parent pointer. The latter two are not mandatory but will help simplify and expedite the process of key reconstruction. 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth, height=6.5cm]{pic/vertical compression.png}
@@ -155,13 +157,13 @@ In order to maintain a clean and well-structured code base, we create an extra n
 
 \subsubsection{Inner Nodes}
 \label{sec:inner-nodes}
-Inspired by the concept of adaptive nodes, we use two data structures with different capacities to represent our inner node as shown in Figure \ref{fig:inner-nodes}. The idea is to choose node sizes dynamically and individually with respect to the actual fanout of the subtree underneath each node. 
+Inspired by the concept of adaptive nodes, we use two data structures with different capacities to represent our inner node, as shown in Figure \ref{fig:inner-nodes}. The motivation is to choose node sizes dynamically and individually with respect to the actual fanout of the subtree underneath each node instead of relying on one global parameter. 
 
-\textbf {Inner Node3}: The smaller node type can store up to 3 partial keys using a fixed size array and child pointers are correspondingly stored at a separate array of the same size. Partial keys are sorted to support order-preserving operations like range scans. 
+\textbf {Inner Node3}: The smaller node type can store up to 3 partial keys using a fixed size array, and child pointers are correspondingly stored at a separate array of the same index size. Partial keys are sorted to support order-preserving operations like range scans.
 
-\textbf {Inner Node (Dynamic)}: The bigger node type can store between 4 and 256 entries using a dynamic array. Each entry is a combination of one partial key with its child pointer and, as with Node3, entries in the array are sorted based on partial keys. When inner nodes are first created, they always start with the Node3 type, and as the number of children exceeds 3, they will be converted to the dynamic type.  
+\textbf {Inner Node (Dynamic)}: The bigger node type can store between 4 and 256 entries using a dynamic array. Each entry is a combination of one partial key with its child pointer, entries in the array are again sorted based on partial keys. When inner nodes are first created, they always start with the Node3 type, and as the number of children exceeds 3, they will be converted to the dynamic type.  
 
-Additionally, when it comes to space overhead, Node3 can have children size from 1 to 3 with a fixed overhead of 32 bytes (pointer in 64 bits platform is usually 8 bytes), while the Node (Dynamic) can have children size from 4 to 256 with a varying overhead from 88 to 4120 bytes. 
+Additionally, when it comes to space overhead, Node3 can have 1 to 3 children with a fixed overhead of 32 bytes with standard 8-byte pointers, while the Node (Dynamic) can have children size from 4 to 256 with a varying overhead from 88 to 4120 bytes. 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth, height=6.5cm]{pic/inner nodes.png}
@@ -171,10 +173,10 @@ Additionally, when it comes to space overhead, Node3 can have children size from
 \end{figure}
 
 \subsubsection{Leaf Nodes}
-Since the FDB memory storage engine is a key-value store, our index structure must store the values associated with the corresponding keys. There are two different design choices: 
-% @mengran you will have to explain this section better.  I tried to rewrite this to how I understand it given the figure, but you may need to explain more.
+Since the FDB memory storage engine is a key-value store, our index structure must store the values associated with the corresponding keys. There are two different design options: 
 \begin{itemize}
-    \item Option one : Dedicate leaf nodes to only storing values, not keys.     \item Option two : Allow leaf node structures to keep both values and partial keys, as space allows.
+    \item Option one : Dedicate leaf nodes to only storing values, not keys.
+    \item Option two : Allow leaf node structures to keep both values and partial keys, as space allows.
 \end{itemize}
 Figure \ref{fig:leaf-nodes} shows an example of the two options. The second one is the more general method because it reduces the total number of nodes in radix trees by collapsing two nodes into one. In our evaluation, we tested with both implementations and will present the savings of the second method on memory footprint. 
 \begin{figure}[h]
@@ -190,7 +192,7 @@ Figure \ref{fig:leaf-nodes} shows an example of the two options. The second one 
 
 \textbf {std::map VS. std::vector} : For the inner Node (dynamic) type, we have two options for storing partial keys and child pointers:  std::map and std::vector are both dynamic data structures defined in STL C++.  The former is a sorted key-value container, usually implemented as a red-black tree, that requires additional memory usage for maintaining the structure, while the latter is a sequence array whose order we need to maintain in order to keep the entries in order. We pick std::vector to save memory usage, and take advantage of binary search algorithm or SIMD instructions to speedup searching in the linearly-organized vector. 
 
-\textbf {Inline Data} :  FDB uses a 12-byte internal data structure called {\itshape StringRef} to represent keys and values. StringRef consists of two parts: (1) An 8-byte pointer that points to a contiguous heap space allocated by the memory pool (2) An integer that defines the length. We learned from experimentation that around 80\% of nodes in the radix tree have data length smaller than 12 bytes, leading to the inline data optimization. We use a union type to store a StringRef member and a byte array of size 12. If the partial key size is smaller than 12 bytes, we use the byte array without allocating heap memory; If the partial key size is larger than 12 bytes, we then switch to StringRef. 
+\textbf {Inline Data} :  FDB uses a 12-byte internal data structure called {\itshape StringRef} to represent keys and values. StringRef consists of two parts: (1) An 8-byte pointer that points to a contiguous heap space allocated by the memory pool (2) An integer that defines the length. We learned from experimentation that around 80\% of nodes in Wavefront radix tree have data length smaller than 12 bytes, leading to the inline data optimization. We use a union type to store a StringRef member and a byte array of size 12. If the partial key size is smaller than 12 bytes, we use the byte array without allocating heap memory; If the partial key size is larger than 12 bytes, we then switch to StringRef. 
 % \begin{lstlisting}[language=C, caption=Example inline data]
 % struct StringRef{
 %     uint8_t *pointer;
@@ -206,16 +208,17 @@ Figure \ref{fig:leaf-nodes} shows an example of the two options. The second one 
 In this section, we evaluate our radix tree memory storage engine and compare it with the default balanced binary search tree implementation. We first describe the experimental setup before presenting our results, which focus on the following aspects: (1) memory consumption, (2) performance. 
  
 \subsection{Testbed and Workloads}
-Experiments were conducted on Wavefront internal testing cluster {\itshape mawenzi}. It consists of 6 database machines of i3.16xlarge instance type (64 vCPU, 488 GB RAM) and 42 FDB storage server processes. The maximum memory usage on each process is set to be 22GB. Furthermore, one of the useful properties of mawenzi is a "quad buffer" configuration which means we divide data between 4 parallel memory storage engines evenly using the murmur3 hash. This configuration gives us the ability to see how radix tree storage engine behaves against the default binary search tree, under \textbf {nearly identical} workloads. In the following experiments, memory and memory 1 are set to be radix tree while memory 2 and memory 3 are set to be binary search tree. 
+Experiments were conducted on Wavefront internal testing cluster {\itshape mawenzi}. It consists of 6 database machines of i3.16xlarge instance type (64 vCPU, 488 GB RAM) and 42 FDB storage server processes. The maximum memory usage on each process is set to be 22GB. Furthermore, one of the useful properties of mawenzi is a "quad buffer" configuration which means we divide data between 4 parallel memory storage engines evenly using the murmur3 hash. This configuration gives us the ability to see how radix tree storage engine behaves against the default binary search tree, under \textbf {nearly identical} workloads. In the following experiments, memory 0 and memory 1 buffers are set to be radix tree while memory 2 and memory 3 buffers are set to be binary search tree. 
 
 For our workloads, 
 \begin{itemize}
     \item We use real-life Wavefront time series points generated by different customers. The average key length is 55 bytes and the value length is 8 bytes. Search, insert and delete operations are random. 
-    \item We also test with a more generic dataset, the Wikipedia titles collection (295 MiB) \cite{wikidatasets}. This workload consists of inserting all the titles from the Wikipedia archive into two memory storage engines. We then check the used memory space after the insert and then search for all the entries. The key is the title entry, with average length of 20 bytes, and value is a randomly generated 8 bytes double. 
+    \item We also test with a more generic dataset, the Wikipedia titles collection (295 MiB) \cite{wikidatasets}. This workload consists of inserting all the titles from the Wikipedia archive into two memory storage engines, checking the used memory space after the insert and then searching for all the entries. The key is the title entry, with average length of 20 bytes, and value is a randomly generated 8 bytes double. 
 \end{itemize}
 
 \subsection{Space Consumption}
-Table \ref{tab:memory-usage} reports the memory consumption in MiB for two different storage engines. Memory consumption here is a metric gathered by the operating system.  Other than raw key-value size, it also includes node overhead, memory pool padding, data replication, etc. The table shows that for all datasets, radix tree outperforms the default implementation in terms of space efficiency. To be more specific, for Wavefront workloads, when the system stabilized, our radix tree store consumes 25\% less memory for \textbf {each} storage server process; for textual datasets, like the Wikipedia archive, our radix tree store still requires 20\% less space. 
+Table \ref{tab:memory-usage} reports the memory consumption in MiB for two different storage engines. Memory consumption here is a metric gathered by the operating system.  Other than raw key-value size, it also includes node overhead, memory pool padding, data replication, etc. The table shows that for all datasets, radix tree outperforms the default implementation in terms of space efficiency. For Wavefront workloads, when the system stabilized, our radix tree store consumes 25\% less memory for each storage server process; for textual datasets, like the Wikipedia archive, our radix tree store still requires 20\% less space. 
+
 \begin{table}[h]
   \caption{Memory consumption for storage engine types (in MiB)}
   \begin{tabular}{ccl}
@@ -231,17 +234,17 @@ Table \ref{tab:memory-usage} reports the memory consumption in MiB for two diffe
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=\linewidth, height=6.5cm]{pic/read latency.png}
+  \includegraphics[width=\linewidth, height=6cm]{pic/read latency.png}
   \setlength{\belowcaptionskip}{-8pt} 
-  \caption{Read latency values, including p99 and median, of different storage engines on mawenzi}
+  \caption{Read latency, including p99 and median, of different storage engines on mawenzi}
   \label{fig:read-latency}
 \end{figure*}
 
 \subsection{Performance}
-Figure \ref{fig:read-latency} demonstrates the read latency for two different storage engines for Wavefront workloads. We measure the read latency for point queries and range queries on the mawenzi cluster and then report it as a histogram. In Figure \ref{fig:read-latency}, the black lines represent the median value and the red lines represent p99.  We see that the two storage engine types have basically the same performance. Table \ref{tab:wiki-latency} records the insert and search latency for Wikipedia dataset. Overall, radix tree storage engine has comparable performance as default. 
+Figure \ref{fig:read-latency} demonstrates the read latency for two different storage engines for Wavefront workloads. We measure the read latency for point queries and range queries on the mawenzi cluster and then report it as a histogram. In Figure \ref{fig:read-latency}, the black lines represent the median value and the red lines represent p99.  We see that the two storage engine types have basically the same performance. Table \ref{tab:wiki-latency} records the average insert and search latency for Wikipedia dataset. Overall, radix tree storage engine has comparable performance as default. 
 
 \begin{table}[h]
-  \caption{Lookup and insert operation latency}
+  \caption{Average lookup and insert operation latency}
   \begin{tabular}{ccl}
     \toprule
     Storage engine type&Lookup($\mu$s/key)&Insert($\mu$s/key)\\
@@ -253,12 +256,12 @@ Figure \ref{fig:read-latency} demonstrates the read latency for two different st
   \label{tab:wiki-latency}
 \end{table}
 
-From these experiments, we conclude that besides featuring superior memory consumption in comparison with the default version, the radix tree engine is able to maintain the search and update performance. 
+From these experiments, we conclude that besides featuring superior memory consumption compare to the default implementation, the radix tree engine is able to keep roughly the same search and update performance. 
 
 \section{Conclusions and Future work}
-In this paper, we show how to implement a fast and space-efficient FDB memory storage engine using the radix tree index structure. By taking advantage of a high fanout parameter and vertical compression, we are able to reduce the tree height as well as the time complexity for search and update operations. Adaptive node representations, along with other optimizations like bit fields, inline data, limit the memory overhead and therefore lead to excellent space usage. Our experimental results show that the radix tree storage engine outperforms the default binary search tree in terms of space efficiency with at least 20\% saving. As for read-write performance, those two implementations have comparable results. 
+In this paper, we describe how to implement a fast and space-efficient FDB memory storage engine using the radix tree index structure. By taking advantage of vertical compression, we’re able to reduce the tree height. Adaptive node representations, along with other optimizations like bit fields and inline data, limit the memory overhead and therefore lead to excellent space usage. Our experimental results show that the Wavefront radix tree storage engine outperforms the default binary search tree in terms of space efficiency with at least 20\% savings. As for read-write performance, those two implementations have comparable results. 
 
-In the future, we intend to add more aggressive methods to further decrease the node overhead. For example, use delta encoding algorithm for pointer representations. Also, we plan to implement optimizations for bulk deletions. Instead of erasing the node one by one, there is a quick way to delete subtree entirely.   
+In the future, we intend to add more aggressive methods to further decrease the node overhead. For example, we have discussed using a delta encoding algorithm for child pointer representations. Also, we plan to implement optimizations for bulk deletions. Instead of erasing each node one by one, there will be a quick way to delete subtree entirely.   
 
 %%
 %% The next two lines define the bibliography style to be used, and
